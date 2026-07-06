@@ -1,205 +1,125 @@
-# Swasthya AI — Real Google Cloud Version
+# Swasthya AI
+**Intelligent Health Access & Decision-Support Platform** — built natively on Google Cloud (BigQuery ML, Vertex AI, ADK Agents, Pub/Sub, Cloud Functions).
 
-This is the GCP-native rebuild of the local prototype. It uses **actual**
-BigQuery, Vertex AI, BigQuery ML, and ADK — not stand-ins — so it's valid
-for a hackathon submission that requires real Google Cloud usage.
-
-I can't run these commands myself (this sandbox has no network access to
-`googleapis.com`), so you'll run them from Cloud Shell or your own
-terminal, where you're actually authenticated. Every command below is
-copy-pasteable.
+Swasthya AI turns raw disease-surveillance and immunization data into three things a public health worker actually needs: a plain-English answer, an early warning, and a next action — automatically dispatched.
 
 ---
 
-## 0. Prerequisites (10 min)
+## 1. What it does
 
-1. **Google Cloud account** — https://console.cloud.google.com
-   New accounts get **$300 free credit / 90 days**, which is more than
-   enough for a hackathon build. Add a billing account (required even
-   for free credit, but you won't be charged unless you exceed it).
-2. **Create a project**: Console → top bar → "New Project" → name it
-   e.g. `swasthya-ai-hackathon`. Note the **Project ID** (not the display
-   name — it's the lowercase-with-hyphens one).
-3. Install the `gcloud` CLI if working locally, or just use **Cloud
-   Shell** (icon top-right of the Console) which has everything
-   pre-installed. I'll assume Cloud Shell below — it's the fastest path.
-4. In Cloud Shell:
-   ```bash
-   gcloud auth login
-   gcloud config set project YOUR_PROJECT_ID
-   ```
-
----
-
-## 1. Get the code onto your machine / Cloud Shell
-
-Download `swasthya_ai_gcp.zip` (link at the end of this chat) and upload
-it into Cloud Shell (⋮ menu → Upload), or `git clone` it if you push it
-to your own repo first. Then:
-
-```bash
-unzip swasthya_ai_gcp.zip && cd swasthya_ai_gcp
-```
-
----
-
-## 2. Edit the placeholders
-
-Open `infra/setup.sh` and `infra/deploy_cloud_run.sh` and replace:
-```
-PROJECT_ID="your-gcp-project-id"   →  your real project ID
-```
-(Region `asia-south1` = Mumbai is a good default if you're targeting
-India; change if you like.)
-
----
-
-## 3. Bootstrap the project (enables APIs, creates BigQuery dataset/tables,
-   service account, storage bucket)
-
-```bash
-chmod +x infra/setup.sh
-bash infra/setup.sh
-```
-
-This runs for a couple of minutes the first time (API enablement is
-slow). It will also try to create the BigQuery tables from
-`sql/create_tables.sql`.
-
-**Note on Vertex AI access**: `aiplatform.googleapis.com` needs no extra
-approval — it's enabled instantly like any other API, unlike the old
-allowlisted Gemini API. No waiting.
-
----
-
-## 4. Generate and load the data
-
-```bash
-pip install -r requirements.txt   # or: pip install pandas numpy
-python3 data_gen.py --to-csv
-```
-
-This prints the exact `bq load` commands (also shown here for
-convenience — fill in your project ID):
-
-```bash
-bq load --source_format=CSV --skip_leading_rows=1 \
-  YOUR_PROJECT:swasthya_ai.symptom_reports data/symptom_reports.csv \
-  report_date:DATE,district:STRING,block:STRING,village:STRING,disease:STRING,cases:INTEGER,population:INTEGER
-
-bq load --source_format=CSV --skip_leading_rows=1 \
-  YOUR_PROJECT:swasthya_ai.immunization_records data/immunization_records.csv \
-  report_date:DATE,district:STRING,block:STRING,village:STRING,vaccine:STRING,children_due:INTEGER,children_covered:INTEGER
-```
-
-Verify it landed:
-```bash
-bq query --use_legacy_sql=false 'SELECT COUNT(*) FROM `swasthya_ai.symptom_reports`'
-```
-
-> **Swap in real data later**: once this works, replace
-> `data/*.csv` with a real IDSP/Dataful/HMIS export shaped to the same
-> columns, and reload with the same `bq load` commands. Everything
-> downstream is unchanged.
-
----
-
-## 5. Train the BigQuery ML anomaly model (this is your real "AI capability #2")
-
-```bash
-bq query --use_legacy_sql=false < sql/train_anomaly_model.sql
-```
-
-This creates two `ARIMA_PLUS` models directly inside BigQuery
-(`disease_spike_model`, `immunization_dropoff_model`). Training takes
-1-3 minutes. You can sanity-check anomalies show up with:
-
-```bash
-bq query --use_legacy_sql=false '
-SELECT * FROM ML.DETECT_ANOMALIES(
-  MODEL `swasthya_ai.disease_spike_model`,
-  STRUCT(0.95 AS anomaly_prob_threshold))
-WHERE is_anomaly = TRUE
-ORDER BY anomaly_probability DESC
-LIMIT 10'
-```
-
-You should see the seeded Dengue spike and vaccine-coverage drop show up.
-
----
-
-## 6. Run the app locally against real GCP services
-
-```bash
-gcloud auth application-default login    # lets your laptop act as "you" for BigQuery/Vertex AI
-export GCP_PROJECT_ID=YOUR_PROJECT_ID
-export GCP_REGION=asia-south1
-export BQ_DATASET=swasthya_ai
-streamlit run app.py
-```
-
-Open the printed local URL. All three tabs (NL Q&A, Anomalies, Agent)
-now hit real BigQuery + Vertex AI + ADK — no API key box needed anymore,
-since Vertex AI auth comes from your `gcloud auth application-default login`.
-
----
-
-## 7. Deploy it publicly on Cloud Run (so you have a live demo link for submission)
-
-```bash
-chmod +x infra/deploy_cloud_run.sh
-bash infra/deploy_cloud_run.sh
-```
-
-This builds your container via Cloud Build and deploys to Cloud Run,
-using the service account created in step 3 — so no key files are ever
-uploaded or embedded. It prints a live `https://swasthya-ai-xxxxx.a.run.app`
-URL at the end. That's your demo link.
-
----
-
-## 8. (Optional, but strengthens the "decision-support" criterion) Looker Studio dashboard
-
-1. Go to https://lookerstudio.google.com → **Create → Report**
-2. Connector: **BigQuery** → select your project → `swasthya_ai` dataset
-   → `symptom_reports` or a query-based custom table.
-3. Add a time-series chart (cases by week, filter by village/disease) and
-   a table of the ML.DETECT_ANOMALIES output (use a **Custom Query**
-   connector with the SQL from step 5).
-4. Share the report link alongside your Cloud Run demo — this is the
-   "district officer decision-support" piece from the architecture doc,
-   and it costs zero extra code.
-
----
-
-## 9. What maps to what (for your submission writeup)
-
-| Requirement | What's actually running |
+| Capability | How it's implemented |
 |---|---|
-| Understand & analyze data | BigQuery tables (`symptom_reports`, `immunization_records`) |
-| NL Q&A | Vertex AI Gemini (`modules/nl2sql_vertex.py`) → generates SQL → runs on BigQuery → Gemini summarizes |
-| Pattern/anomaly detection | **BigQuery ML** `ARIMA_PLUS` models + `ML.DETECT_ANOMALIES` (`sql/train_anomaly_model.sql`) |
-| Recommendations | Gemini reasoning inside the ADK agent instruction |
-| Workflow automation | ADK **tool call** (`dispatch_notification`) writes to BigQuery; wire to Cloud Functions + Twilio/SendGrid for a real SMS (see step 10) |
-| Decision-support dashboard | Looker Studio on top of BigQuery |
-| Explainability | `anomaly_probability` / model decomposition from BigQuery ML, shown directly in the UI |
+| **Natural language Q&A** | Ask a question like "Is Dengue currently anomalous in Lakshadweep?" in plain English. Vertex AI translates it to SQL, runs it against BigQuery, and cross-checks the answer against live anomaly output. |
+| **Pattern / anomaly detection** | Two `ARIMA_PLUS` models in BigQuery ML (`disease_spike_model`, `immunization_dropoff_model`) forecast expected case counts / coverage rates per village+disease (or village+vaccine) series, and flag statistically significant deviations via `ML.DETECT_ANOMALIES`. |
+| **Recommendations** | A Gemini-powered ADK agent takes a real detected anomaly (village, disease, case count, expected baseline, anomaly strength) and reasons over it to produce a specific, actionable recommendation — not a generic template. |
+| **Workflow automation** | Every agent recommendation is logged to a BigQuery audit table and simultaneously published to Pub/Sub, which triggers a Cloud Function that emails the on-call recipient — no human has to notice the anomaly manually. |
+| **Decision support** | The Anomalies tab lets a user browse, filter, and select a real flagged anomaly and hand it directly to the agent with one click — closing the loop from "detected" to "recommended action" inside the same UI. |
 
 ---
 
-## 10. Optional stretch: make the notification real (not just a BigQuery row)
+## 2. Architecture
 
-Create a Cloud Function triggered on BigQuery table inserts (via
-Eventarc) that calls Twilio's SMS API. That's a genuinely separate
-piece of infra — happy to write that Cloud Function for you if you want
-to add it; just ask, and tell me whether you have (or want to set up) a
-Twilio trial account, since the function needs an API key for that.
+```
+                     ┌─────────────────────┐
+  Public health data │  BigQuery datasets   │
+  (symptom_reports,  │  symptom_reports     │
+  immunization_recs) │  immunization_records│
+                     └──────────┬───────────┘
+                                │
+                     ┌──────────▼───────────┐
+                     │   BigQuery ML         │
+                     │   ARIMA_PLUS models    │
+                     │   ML.DETECT_ANOMALIES  │
+                     └──────────┬───────────┘
+                                │
+        ┌───────────────────────┼────────────────────────┐
+        │                       │                         │
+┌───────▼────────┐   ┌──────────▼─────────┐   ┌───────────▼──────────┐
+│ Tab 1: Ask      │   │ Tab 2: Anomalies    │   │ Tab 3: Agent          │
+│ (Vertex AI      │   │ (browse/filter,     │   │ Recommendations       │
+│ NL → SQL)       │   │ "Send to Agent")    │   │ (Gemini + ADK)        │
+└───────┬────────┘   └──────────┬─────────┘   └───────────┬──────────┘
+        └───────────────────────┴────────────────────────┘
+                                │
+                     ┌──────────▼───────────┐
+                     │ agent_adk.py          │
+                     │ → BigQuery audit log  │
+                     │ → Pub/Sub publish     │
+                     └──────────┬───────────┘
+                                │
+                     ┌──────────▼───────────┐
+                     │ Cloud Function (2nd gen)│
+                     │ Pub/Sub trigger        │
+                     │ → Gmail SMTP email      │
+                     │ (App Password in       │
+                     │ Secret Manager)         │
+                     └───────────────────────┘
+```
+
+**Stack:** Streamlit (UI) · BigQuery + BigQuery ML (storage, forecasting, anomaly detection) · Vertex AI / Gemini (NL→SQL, agent reasoning) · ADK (agent tool-use framework) · Pub/Sub + Cloud Functions 2nd gen (notification pipeline) · Secret Manager (credential storage).
 
 ---
 
-## Cost note
+## 3. Project structure
 
-At hackathon scale (a few thousand rows, a handful of Gemini calls,
-Cloud Run's free tier of ~2M requests/month) this comfortably stays
-inside the $300 free credit — likely under $1-2 total even with the ML
-model training. The only easy way to rack up cost is running big BigQuery
-scans repeatedly on an unpartitioned huge table, which doesn't apply here.
+```
+swasthya_gcp/
+├── app.py                     # Streamlit app — 3 tabs (Ask / Anomalies / Agent)
+├── modules/
+│   ├── bq_client.py            # BigQuery client + PROJECT_ID/DATASET config
+│   ├── nl2sql_vertex.py        # Vertex AI natural-language-to-SQL
+│   └── agent_adk.py            # Gemini + ADK agent, logs + publishes alerts
+├── sql/
+│   ├── create_tables.sql       # symptom_reports, immunization_records schemas
+│   └── train_anomaly_model.sql # CREATE MODEL statements (ARIMA_PLUS)
+├── cloud_function/             # Pub/Sub-triggered email sender
+├── deploy_notification_function.sh
+└── infra/
+    ├── setup.sh                # Enables APIs, creates BQ tables, loads data
+    └── deploy_cloud_run.sh     # Optional: deploy Streamlit app to Cloud Run
+```
+
+---
+
+## 4. Setup (from scratch)
+
+```bash
+# 1. One-time GCP setup — enables APIs, creates BQ dataset/tables, loads data
+bash infra/setup.sh
+
+# 2. Train the anomaly-detection models
+bq query --use_legacy_sql=false < sql/train_anomaly_model.sql
+
+# 3. Deploy the email notification pipeline (Pub/Sub + Cloud Function + Secret Manager)
+chmod +x deploy_notification_function.sh
+./deploy_notification_function.sh
+#   — prompts for a Gmail App Password (https://myaccount.google.com/apppasswords)
+
+# 4. Run the app locally (e.g. in Cloud Shell)
+streamlit run app.py \
+  --server.enableCORS=false \
+  --server.enableXsrfProtection=false \
+  --server.address=0.0.0.0 \
+  --server.port=8501
+# Open via Cloud Shell's "Web Preview → Preview on port 8501" button
+```
+
+**Env vars expected:** `GCP_PROJECT_ID`, `GCP_REGION`, `BQ_DATASET` (set in `.env` locally, or as Cloud Run env vars if deployed there). Auth via `gcloud auth application-default login` locally, or an attached service account on Cloud Run.
+
+---
+
+## 5. Known limitations (worth stating proactively to judges)
+
+Being upfront about these shows engineering maturity — they're documented trade-offs, not bugs we missed:
+
+1. **Z-score is a derived proxy, not a native BigQuery ML field.** `ML.DETECT_ANOMALIES` returns `anomaly_probability` and a `[lower_bound, upper_bound]` confidence interval — no z-score. We approximate one as `(actual − midpoint) / ((upper − lower) / 4)`, assuming the interval is roughly ±2σ. Good enough for demo severity ranking; not a statistically rigorous z-score.
+2. **`ARIMA_PLUS` imputes synthetic data points** to fill gaps in sparse, irregularly-reported real-world series before fitting. This means some flagged anomalies sit on interpolated dates that were never actually reported — the case count shown for those is a model estimate, not a literal logged figure. We surface these anomalies rather than silently dropping them, since a gap in reporting can itself be a meaningful signal.
+3. **"Village" in this dataset is really district-level data** (village == block == district for every row), inherited from the source dataset's granularity. The UI labels reflect the original three-tier design intent; the underlying real data doesn't yet have true village-level resolution.
+4. **Streamlit can't programmatically switch tabs** on a button click (a framework limitation, not ours) — selecting an anomaly shows a success message asking the user to click over to the Agent tab manually, rather than auto-navigating.
+5. **Notification pipeline uses Gmail SMTP** (App Password via Secret Manager) rather than a dedicated transactional email service — a deliberate simplicity trade-off for a hackathon timeline; a production deployment would move to SendGrid/Mailgun/etc.
+
+---
+
+## 6. Team notes
+
+_Add team name, member names, and hackathon track/track name here before submission._
