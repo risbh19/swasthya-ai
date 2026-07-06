@@ -120,6 +120,3 @@ Being upfront about these shows engineering maturity — they're documented trad
 
 ---
 
-## 6. Team notes
-
-_Add team name, member names, and hackathon track/track name here before submission._
